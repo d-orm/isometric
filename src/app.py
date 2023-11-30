@@ -1,18 +1,17 @@
 import pygame as pg
 import pygame.gfxdraw as gfxdraw
 from opensimplex import OpenSimplex
-
+import asyncio
 
 class Camera:
     def __init__(self, app: "App"):
         self.app = app
         self.offset_x, self.offset_y = 0, 0
         self.speed = 1111 
-        self.view_rect = pg.Rect(-self.offset_x, -self.offset_y, app.screen_w, app.screen_h)
+        self.view_rect = pg.Rect(0, 0, app.screen_w, app.screen_h)
 
     def update(self):
-        self.view_rect.x = -self.offset_x
-        self.view_rect.y = -self.offset_y
+        pass
 
     def move(self, x: int, y: int, dt: float):
         self.offset_x += x * self.speed * dt
@@ -23,7 +22,19 @@ class Camera:
 
 
 class Tile:
-    def __init__(self, app: "App", image: pg.Surface, elevation, grid_pos, tile_size, cube_height, shadow_type, needs_layering, is_surface_tile, chunk_id):
+    def __init__(
+            self, 
+            app: "App", 
+            image: pg.Surface, 
+            elevation, 
+            grid_pos, 
+            tile_size, 
+            cube_height, 
+            shadow_type, 
+            needs_layering, 
+            is_surface_tile, 
+            chunk_id
+        ):
         self.app = app
         self.image = image
         self.elevation = elevation
@@ -35,7 +46,6 @@ class Tile:
         self.is_surface_tile = is_surface_tile
         self.chunk_id = chunk_id
         self.rect = self.image.get_rect()
-        self.mask = pg.mask.from_surface(self.image)
 
         isometric_x = (self.grid_pos[0] * self.tile_size) - (self.grid_pos[1] * self.tile_size)
         isometric_y = (self.grid_pos[0] + self.grid_pos[1]) * self.tile_size // 2
@@ -44,10 +54,9 @@ class Tile:
         self.rect = self.image.get_rect()
         self.rect.x = isometric_x
         self.rect.y = isometric_y - elevation_offset
-    
+   
     def draw(self, screen: pg.Surface, camera: "Camera"):
-        screen.blit(self.image, camera.apply(self.rect))
-        self.mask = pg.mask.from_surface(self.image)
+        screen.blit(self.image, camera.apply(self.rect))      
 
 
 class Shadows:
@@ -101,9 +110,6 @@ class Chunk:
         self.main_surface = pg.Surface((self.width, self.height), pg.SRCALPHA)
         self.rect = self.main_surface.get_rect()
         self.shadows = Shadows(self)
-        self.top_layer_surface = pg.Surface((self.width, self.height), pg.SRCALPHA)
-        self.mask_surface = pg.Surface((self.width, self.height), pg.SRCALPHA)
-        self.mask_tex = self.world.create_cube(self.world.marble_tex, apply_shading=False)
         self.top_layer_tiles: list["Tile"] = []
 
     def update(self):
@@ -113,25 +119,16 @@ class Chunk:
         for tile in self.tiles:
             if not tile.needs_layering:
                 self.main_surface.blit(tile.image, (tile.rect.x - self.rect.x, tile.rect.y - self.rect.y))
-                self.mask_surface.blit(self.mask_tex, (tile.rect.x - self.rect.x, tile.rect.y - self.rect.y))
                 self.shadows.draw(tile, self.shadows.main_surface)
             else:
-                self.mask_surface.blit(tile.image, (tile.rect.x - self.rect.x, tile.rect.y - self.rect.y))
-                self.shadows.draw(tile, self.shadows.top_layer_surface)
+                self.shadows.draw(tile, self.shadows.main_surface)
                 if tile.is_surface_tile:
                     self.top_layer_tiles.append(tile)
-        
-        self.mask_surface.set_colorkey((255, 0, 255, 255))
-        self.top_layer_surface = self.mask_surface.convert_alpha()
 
         self.main_surface.blit(self.shadows.main_surface, (0, 0))
-        self.top_layer_surface.blit(self.shadows.top_layer_surface, (0, 0))
 
     def draw_main_layer(self, screen: pg.Surface, camera: "Camera"):
         screen.blit(self.main_surface, camera.apply(self.rect))
-        
-    def draw_top_layer(self, screen: pg.Surface, camera: "Camera"):
-        screen.blit(self.top_layer_surface, camera.apply(self.rect))
 
     def add_tile(self, tile: "Tile"):
         self.tiles.append(tile)
@@ -151,60 +148,35 @@ class World:
         self.chunk_size = self.app.scale * 4
         self.grass_tex = pg.image.load("assets/grass.jpg").convert_alpha()
         self.dirt_tex = pg.image.load("assets/dirt.jpg").convert_alpha()
-        mask_surface = pg.Surface((self.tile_size * 3, self.tile_size + self.cube_height * 2), pg.SRCALPHA)
-        mask_surface.fill((255, 0, 255, 255))
-        self.marble_tex = mask_surface
+        self.mask_tex = pg.Surface((self.tile_size * 3, self.tile_size + self.cube_height * 2), pg.SRCALPHA)
+        self.mask_tex.fill((255, 0, 255, 255))
+        self.player_tex = pg.image.load("assets/rock2.png").convert_alpha()
         self.grid = self.create_grid()
         self.top_layer_positions: list[tuple[int, int]] = []
         self.tiles: list["Tile"] = self.create_tiles()
         self.chunks: list["Chunk"] = self.create_chunks()
-        self.player = Player(self.app, self.create_cube(self.marble_tex), 0, (0, 0), self.tile_size, self.cube_height, True, False, False, -1)
+        self.player = Player(self.app, self.create_cube(self.player_tex), 0, (0, 0), self.tile_size, self.cube_height, True, False, False, -1)
         self.river_surface, self.river_rect = self.create_river()
 
     def update(self):
         pass
-        # self.get_player_layer(self.app.camera)
-
-    def get_player_layer(self, camera: "Camera"):
-        player_rect = camera.apply(self.player.rect)
-        player_mid_top = player_rect.centerx, player_rect.top + self.cube_height * 2 
-        player_current_tile = None
-
-        for chunk in self.chunks:
-            if camera.view_rect.colliderect(chunk.rect):
-                for tile in chunk.top_layer_tiles:
-                    if self.player.rect.colliderect(tile.rect):
-                        player_current_tile = tile
-                        player_current_tile_rect = camera.apply(tile.rect)
-                        player_current_tile_mid_top = player_current_tile_rect.centerx, player_current_tile_rect.top
-                        smaller_player_rect = pg.Rect(player_rect.x, player_rect.y, player_rect.width, player_rect.height - self.cube_height * 2)
-                        mask_overlap = self.player.mask.overlap(tile.mask, (tile.rect.x - smaller_player_rect.x, tile.rect.y - smaller_player_rect.y))
-                        if mask_overlap:
-                            player_current_tile = tile
-                            player_current_tile_rect = camera.apply(tile.rect)
-                            player_current_tile_mid_top = player_current_tile_rect.centerx, player_current_tile_rect.top
-
-        if player_current_tile:
-            pg.draw.circle(self.app.screen, pg.Color("red"), player_current_tile_mid_top, 5)
-
-            if player_mid_top[1] > player_current_tile_mid_top[1]:
-                self.player.draw(self.app.screen, camera)
-                                
-        pg.draw.circle(self.app.screen, pg.Color("blue"), (player_mid_top), 5)
 
     def draw(self, screen: pg.Surface, camera: "Camera"):
         for chunk in self.chunks:
             if camera.view_rect.colliderect(chunk.rect):
                 chunk.draw_main_layer(screen, camera)
-                if self.player.current_grid_pos in self.top_layer_positions: # TODO fix edge case where player is on two top layer tiles
-                    chunk.draw_top_layer(screen, camera)
-                    self.player.draw(screen, camera)
-                else:
-                    self.player.draw(screen, camera)
-                    chunk.draw_top_layer(screen, camera)
+
+                entities = [(tile, tile.rect.y) for tile in chunk.top_layer_tiles]
+                entities.append((self.player, self.player.rect.y))
+
+                sorted_entities = sorted(entities, key=lambda x: x[1])
+
+                for entity, _ in sorted_entities:
+                    entity.draw(screen, camera)
+                    if entity.grid_pos == self.player.current_grid_pos:
+                        self.player.draw(screen, camera)
 
                 self.draw_rivers(screen, camera)
-                # pg.draw.rect(screen, pg.Color("red"), camera.apply(chunk.rect), 1)
 
     def create_river(self):
         points = [(0, 0), (0, 1), (1, 1), (1, 0)]
@@ -241,27 +213,60 @@ class World:
     def create_tiles(self) -> list["Tile"]:
         print("creating tiles")
         tiles = []
-        grass_image = self.create_cube(self.grass_tex)
-        dirt_image = self.create_cube(self.dirt_tex) 
-        marble_img = self.create_cube(self.marble_tex, apply_shading=False)
+        grass_image_full = self.create_cube(self.grass_tex)
+        grass_image_no_left_face = self.create_cube(self.grass_tex, left_face_visible=False)
+        grass_image_no_right_face = self.create_cube(self.grass_tex, right_face_visible=False)
+        grass_image_top_only = self.create_cube(self.grass_tex, left_face_visible=False, right_face_visible=False)
+
+        dirt_image_full = self.create_cube(self.dirt_tex) 
+        dirt_image_no_left_face = self.create_cube(self.dirt_tex, left_face_visible=False)
+        dirt_image_no_right_face = self.create_cube(self.dirt_tex, right_face_visible=False)
+        dirt_image_top_only = self.create_cube(self.dirt_tex, left_face_visible=False, right_face_visible=False)
+        
         for y, row in enumerate(self.grid):
             for x, elevation in enumerate(row):
-                img = dirt_image if elevation % 2 == 0 else grass_image
+                # img = dirt_image if elevation % 2 == 0 else grass_image
                 chunk_id = (x // self.chunk_size) + (y // self.chunk_size) * (self.height // self.chunk_size)
 
                 needs_layering = not (not self.has_lower_northeast_neighbor(x, y) and not self.has_lower_northwest_neighbor(x, y) and not self.has_lower_north_neighbor(x, y))
 
-                # img = img if not needs_layering else marble_img
+                left_face_visible = not self.has_equal_or_higher_southwest_neighbor(x, y)
+                right_face_visible = not self.has_equal_or_higher_southeast_neighbor(x, y)
+
+                if elevation % 2 == 0:
+                    tile_type = "dirt"
+                else:
+                    tile_type = "grass"
+
+                if needs_layering:
+                    if not left_face_visible and right_face_visible:
+                        img = grass_image_no_left_face if tile_type == "grass" else dirt_image_no_left_face
+                    elif left_face_visible and not right_face_visible:
+                        img = grass_image_no_right_face if tile_type == "grass" else dirt_image_no_right_face
+                    elif not left_face_visible and not right_face_visible:
+                        img = grass_image_top_only if tile_type == "grass" else dirt_image_top_only
+                    else:
+                        img = grass_image_full if tile_type == "grass" else dirt_image_full
+                else:
+                    img = grass_image_full if tile_type == "grass" else dirt_image_full
+
 
                 for elev in range(elevation + 1):
                     has_shadow = False if elev != elevation and elevation != 0 else self.has_lower_southeast_neighbor(x, y)
-                    is_surface_tile = elev == elevation
+                    is_surface_tile = elev == elevation       
                     shadow_type = "partial" if has_shadow and self.has_equal_or_higher_south_neighbor(x, y) else "full" if has_shadow else "none"
-                    tiles.append(Tile(self.app, img, elev, (x, y), self.tile_size, self.cube_height, shadow_type, needs_layering, is_surface_tile, chunk_id))
-                if needs_layering:
-                    self.top_layer_positions.append((x, y))
-                    self.top_layer_positions.append((x, y+1))
-                    self.top_layer_positions.append((x+1, y+1))
+                    tiles.append(Tile(
+                                self.app, 
+                                img, 
+                                elev, 
+                                (x, y), 
+                                self.tile_size, 
+                                self.cube_height, 
+                                shadow_type, 
+                                needs_layering, 
+                                is_surface_tile, 
+                                chunk_id
+                            ))
 
         return tiles
 
@@ -290,6 +295,21 @@ class World:
 
     def has_equal_or_higher_south_neighbor(self, x, y):
         return self.has_neighbor_with_condition(x, y, 1, 1, lambda e, ne: ne >= e)
+    
+    def has_equal_or_lower_southwest_neighbor(self, x, y):
+        return self.has_neighbor_with_condition(x, y, 0, 1, lambda e, ne: ne <= e)
+    
+    def has_equal_or_lower_southeast_neighbor(self, x, y):
+        return self.has_neighbor_with_condition(x, y, 1, 1, lambda e, ne: ne <= e)
+    
+    def has_equal_or_higher_southeast_neighbor(self, x, y):
+        return self.has_neighbor_with_condition(x, y, 1, 0, lambda e, ne: ne >= e)
+    
+    def has_equal_or_higher_southwest_neighbor(self, x, y):
+        return self.has_neighbor_with_condition(x, y, 0, 1, lambda e, ne: ne >= e)
+
+        
+
 
     def create_grid(self) -> list[list[int]]:
         return [
@@ -318,7 +338,7 @@ class World:
         ]
         return top_face_points, left_face_points, right_face_points
 
-    def create_cube(self, texture, apply_shading=True) -> pg.Surface:
+    def create_cube(self, texture:pg.Surface, left_face_visible:bool=True, right_face_visible:bool=True, apply_shading:bool=True) -> pg.Surface:
         surface = pg.Surface((self.tile_size * 2, self.tile_size + self.cube_height), pg.SRCALPHA)
 
         top_face_points, left_face_points, right_face_points = self.get_cube_points()
@@ -332,8 +352,10 @@ class World:
             texture_right.fill((150, 150, 150, 255), None, pg.BLEND_RGBA_MULT)
 
         gfxdraw.textured_polygon(surface, top_face_points, texture_top, 0, 0)
-        gfxdraw.textured_polygon(surface, left_face_points, texture_left, 0, 0)
-        gfxdraw.textured_polygon(surface, right_face_points, texture_right, 0, 0)
+        if left_face_visible:
+            gfxdraw.textured_polygon(surface, left_face_points, texture_left, 0, 0)
+        if right_face_visible:
+            gfxdraw.textured_polygon(surface, right_face_points, texture_right, 0, 0)
 
         return surface
     
@@ -384,6 +406,8 @@ class Player(Tile):
         self.acceleration = pg.Vector2(0, 0)
         self.friction = 0.9
         self.max_speed = 100
+        self.texture = pg.image.load("assets/rock2.png").convert_alpha()
+        self.texture = pg.transform.scale(self.texture, (self.tile_size * 2, self.tile_size))
 
     def move(self, x, y, dt):
         self.current_grid_pos = self.current_grid_pos[0] + x, self.current_grid_pos[1] + y
@@ -397,17 +421,8 @@ class Player(Tile):
         self.rect.x = isometric_x
         self.rect.y = isometric_y
 
-    # def move(self, x, y, dt):
-    #     self.acceleration.x += x * self.speed * dt
-    #     self.acceleration.y += y * self.speed * dt
-
-    # def update(self, dt):
-    #     self.velocity += self.acceleration
-    #     self.velocity *= self.friction
-    #     if self.velocity.length() > self.max_speed:
-    #         self.velocity.scale_to_length(self.max_speed)
-    #     self.acceleration *= 0
-    #     self.rect.move_ip(self.velocity.x, self.velocity.y)
+    def draw(self, screen: pg.Surface, camera: "Camera"):
+        screen.blit(self.image, camera.apply(self.rect))  
 
 
 class App:
@@ -416,6 +431,7 @@ class App:
         self.screen_w, self.screen_h = 1920, 1040
         self.screen = pg.display.set_mode((self.screen_w, self.screen_h), pg.RESIZABLE | pg.SCALED)
         self.clock = pg.time.Clock()
+        self.font = pg.font.SysFont("Arial", 14)
         self.scale = 20
         self.tile_size = self.screen_h // self.scale
         self.world = World(
@@ -430,8 +446,9 @@ class App:
         self.controls = Controls(self)
         self.dt = 0
 
-    def run(self):
+    async def run(self):
         while True:
+            await asyncio.sleep(0.0)
             self.events: list[pg.event.Event] = pg.event.get()
             for event in self.events:
                 if event.type == pg.QUIT \
@@ -454,4 +471,4 @@ class App:
 
 
 if __name__ == "__main__":
-    App().run()
+    asyncio.run(App().run())

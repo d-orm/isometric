@@ -2,6 +2,8 @@ import pygame as pg
 import pygame.gfxdraw as gfxdraw
 from opensimplex import OpenSimplex
 import asyncio
+import math
+
 
 class Camera:
     def __init__(self, app: "App"):
@@ -45,15 +47,15 @@ class Tile:
         self.needs_layering = needs_layering
         self.is_surface_tile = is_surface_tile
         self.chunk_id = chunk_id
-        self.rect = self.image.get_rect()
 
         isometric_x = (self.grid_pos[0] * self.tile_size) - (self.grid_pos[1] * self.tile_size)
         isometric_y = (self.grid_pos[0] + self.grid_pos[1]) * self.tile_size // 2
         elevation_offset = self.elevation * self.cube_height
 
-        self.rect = self.image.get_rect()
-        self.rect.x = isometric_x
-        self.rect.y = isometric_y - elevation_offset
+        if self.image:
+            self.rect = self.image.get_rect()
+            self.rect.x = isometric_x
+            self.rect.y = isometric_y - elevation_offset
    
     def draw(self, screen: pg.Surface, camera: "Camera"):
         screen.blit(self.image, camera.apply(self.rect))      
@@ -155,7 +157,7 @@ class World:
         self.top_layer_positions: list[tuple[int, int]] = []
         self.tiles: list["Tile"] = self.create_tiles()
         self.chunks: list["Chunk"] = self.create_chunks()
-        self.player = Player(self.app, self.create_cube(self.player_tex), 0, (0, 0), self.tile_size, self.cube_height, True, False, False, -1)
+        self.player = Player(self.app, None, 0, (0, 0), self.tile_size, self.cube_height, True, False, False, -1)
         self.river_surface, self.river_rect = self.create_river()
 
     def update(self):
@@ -308,9 +310,18 @@ class World:
     def has_equal_or_higher_southwest_neighbor(self, x, y):
         return self.has_neighbor_with_condition(x, y, 0, 1, lambda e, ne: ne >= e)
 
-        
+    def is_neighbor_within_bounds(self, x, y, dx, dy):
+        """ Check if the neighbor at the given offset is within the world bounds. """
+        neighbor_x = x + dx
+        neighbor_y = y + dy
+        return 0 <= neighbor_x < self.width and 0 <= neighbor_y < self.height
 
-
+    def southeast_neighbor_out_of_bounds(self, x, y):
+        return not self.is_neighbor_within_bounds(x, y, 1, 0)
+    
+    def southwest_neighbor_out_of_bounds(self, x, y):
+        return not self.is_neighbor_within_bounds(x, y, 0, 1)
+    
     def create_grid(self) -> list[list[int]]:
         return [
             [int((self.simplex.noise2(x * self.noise_scale, y * self.noise_scale) + 1) / 2 * self.max_elevation)
@@ -358,7 +369,7 @@ class World:
             gfxdraw.textured_polygon(surface, right_face_points, texture_right, 0, 0)
 
         return surface
-    
+      
         
 class Controls:
     def __init__(self, app: "App"):
@@ -401,28 +412,68 @@ class Player(Tile):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.current_grid_pos = self.grid_pos
-        self.speed = 55
-        self.velocity = pg.Vector2(0, 0)
-        self.acceleration = pg.Vector2(0, 0)
-        self.friction = 0.9
-        self.max_speed = 100
-        self.texture = pg.image.load("assets/rock2.png").convert_alpha()
-        self.texture = pg.transform.scale(self.texture, (self.tile_size * 2, self.tile_size))
+        self.image = pg.Surface((self.tile_size * 2, self.tile_size + self.cube_height), pg.SRCALPHA)
+        self.rect = self.image.get_rect()
+        self.image_rect = self.image.get_rect()
+        self.y_offset = self.tile_size // 6
+        self.update_body_parts()
 
     def move(self, x, y, dt):
         self.current_grid_pos = self.current_grid_pos[0] + x, self.current_grid_pos[1] + y
 
-    def update(self, dt):
+    def head_bobbing(self):
+        amp = 2  # amplitude of the bobbing, adjust as needed
+        freq = 0.02  # frequency of the bobbing, adjust as needed
+        bobbing_offset = amp * math.sin(pg.time.get_ticks() * freq)
+        self.head_pos.y += bobbing_offset        
+
+    def update_grid_position(self):
         current_elevation = self.app.world.grid[self.current_grid_pos[1]][self.current_grid_pos[0]]
         current_elevation_offset = current_elevation * self.cube_height
-
         isometric_x = ((self.current_grid_pos[0] * self.tile_size) - (self.current_grid_pos[1] * self.tile_size))
         isometric_y = ((self.current_grid_pos[0] + self.current_grid_pos[1]) * self.tile_size // 2)  - current_elevation_offset - self.cube_height
         self.rect.x = isometric_x
         self.rect.y = isometric_y
 
+    def update(self, dt):
+        self.update_body_parts()
+        self.update_grid_position()
+        self.head_bobbing()
+
     def draw(self, screen: pg.Surface, camera: "Camera"):
-        screen.blit(self.image, camera.apply(self.rect))  
+        self.draw_body_parts()
+        screen.blit(self.image, camera.apply(self.rect)) 
+
+    def draw_body_parts(self) -> pg.Surface:
+        self.image.fill((0, 0, 0, 0))
+        pg.draw.rect(self.image, pg.Color("blue"), self.body_rect, border_radius=5)
+        pg.draw.circle(self.image, pg.Color("pink"), self.left_hand_pos, self.hands_radius)
+        pg.draw.circle(self.image, pg.Color("pink"), self.right_hand_pos, self.hands_radius)
+        pg.draw.rect(self.image, pg.Color("brown"), self.left_foot_rect, border_radius=5)
+        pg.draw.rect(self.image, pg.Color("brown"), self.right_foot_rect, border_radius=5)        
+        pg.draw.circle(self.image, pg.Color("pink"), self.head_pos, self.head_radius)
+
+    def update_body_parts(self) -> pg.Surface:
+        # head circle
+        self.head_radius = self.tile_size // 4
+        self.head_pos = pg.Vector2(self.image_rect.centerx, self.image_rect.centery - self.head_radius - self.y_offset)
+        # body
+        self.body_width = self.tile_size // 2
+        self.body_height = self.tile_size // 2
+        self.body_pos = pg.Vector2(self.image_rect.centerx - self.body_width // 2, self.image_rect.centery - self.y_offset)
+        self.body_rect = pg.Rect(*self.body_pos, self.body_width, self.body_height)
+        # hands
+        self.hands_width = self.tile_size // 6
+        self.hands_radius = self.hands_width // 2
+        self.left_hand_pos = pg.Vector2(self.body_rect.x - self.hands_radius, self.body_rect.centery)
+        self.right_hand_pos = pg.Vector2(self.body_rect.x + self.body_width + self.hands_radius, self.body_rect.centery)
+        # feet
+        self.feet_width = self.tile_size // 3
+        self.feet_height = self.tile_size // 5
+        self.left_foot_pos = pg.Vector2(self.image_rect.centerx - self.feet_width, self.image_rect.centery + self.body_height - self.y_offset)
+        self.left_foot_rect = pg.Rect(*self.left_foot_pos, self.feet_width, self.feet_height)
+        self.right_foot_pos = pg.Vector2(self.image_rect.centerx, self.image_rect.centery + self.body_height - self.y_offset)
+        self.right_foot_rect = pg.Rect(*self.right_foot_pos, self.feet_width, self.feet_height)
 
 
 class App:
